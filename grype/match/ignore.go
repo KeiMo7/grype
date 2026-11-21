@@ -40,6 +40,13 @@ type IgnoreRule struct {
 	VexStatus        string            `yaml:"vex-status" json:"vex-status" mapstructure:"vex-status"`
 	VexJustification string            `yaml:"vex-justification" json:"vex-justification" mapstructure:"vex-justification"`
 	MatchType        Type              `yaml:"match-type" json:"match-type" mapstructure:"match-type"`
+
+	// Expires is an optional expiry for a temporary ignore, as an RFC3339 timestamp or a
+	// YYYY-MM-DD date (interpreted as the end of that day, UTC). It does not participate in
+	// matching: the vulnerability is still ignored for the current scan. It is consumed only by
+	// the vulnerability ledger (see grype/ledger), which returns the finding to the unfixed state
+	// once the expiry passes. An empty value means the ignore is permanent.
+	Expires string `yaml:"expires" json:"expires" mapstructure:"expires"`
 }
 
 // IgnoreRulePackage describes the Package-specific fields that comprise the IgnoreRule.

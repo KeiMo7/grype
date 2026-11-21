@@ -43,7 +43,18 @@ type Grype struct {
 	FixChannel                 FixChannels        `yaml:"fix-channel" json:"fix-channel" mapstructure:"fix-channel"`                                                       // the fix channels to apply to the distro when matching
 	Timestamp                  bool               `yaml:"timestamp" json:"timestamp" mapstructure:"timestamp"`
 	Alerts                     Alerts             `yaml:"alerts" json:"alerts" mapstructure:"alerts"`
-	DatabaseCommand            `yaml:",inline" json:",inline" mapstructure:",squash"`
+	// Ledger, when non-empty, is the path to a vulnerability ledger file to record
+	// this scan into. An empty value disables ledger recording entirely (the default).
+	Ledger string `yaml:"ledger" json:"ledger,omitempty" mapstructure:"ledger"` // --ledger, record results into a persistent vulnerability ledger at this path
+	// LedgerImage optionally overrides the image identity recorded in the ledger.
+	LedgerImage string `yaml:"ledger-image" json:"ledger-image,omitempty" mapstructure:"ledger-image"` // --ledger-image
+	// LedgerBatch optionally groups several scans into one batch. Scans sharing a
+	// batch name are recorded as one batch; writes are serialized by a file lock.
+	LedgerBatch string `yaml:"ledger-batch" json:"ledger-batch,omitempty" mapstructure:"ledger-batch"` // --ledger-batch
+	// LedgerTimestamps controls whether wall-clock timestamps are written into the
+	// ledger; disabled by default so re-running a scan is byte-identical.
+	LedgerTimestamps bool `yaml:"ledger-timestamps" json:"ledger-timestamps,omitempty" mapstructure:"ledger-timestamps"` // --ledger-timestamps
+	DatabaseCommand  `yaml:",inline" json:",inline" mapstructure:",squash"`
 }
 
 type developer struct {
@@ -164,6 +175,26 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 		"vex", "",
 		"a list of VEX documents to consider when producing scanning results",
 	)
+
+	flags.StringVarP(&o.Ledger,
+		"ledger", "",
+		"record results into a persistent vulnerability ledger at this path (disabled by default)",
+	)
+
+	flags.StringVarP(&o.LedgerImage,
+		"ledger-image", "",
+		"image identity to record in the ledger (defaults to the scan source)",
+	)
+
+	flags.StringVarP(&o.LedgerBatch,
+		"ledger-batch", "",
+		"batch name grouping several scans recorded into the same ledger (defaults to the image identity)",
+	)
+
+	flags.BoolVarP(&o.LedgerTimestamps,
+		"ledger-timestamps", "",
+		"write wall-clock timestamps into the ledger (disabled by default so re-running a scan is byte-identical)",
+	)
 }
 
 func (o *Grype) PostLoad() error {
@@ -205,6 +236,7 @@ This is the full set of supported rule fields:
     fix-state: unknown                   # match by fix state; options: fixed, not-fixed, wont-fix, unknown
     match-type: exact-direct-match       # match by how the vulnerability was found; options: exact-direct-match, exact-indirect-match, cpe-match
     reason: "tolerated by policy"        # optional human-readable note recorded on the ignored match (does not affect matching)
+    expires: "2026-06-30"                # optional expiry for a temporary ignore (RFC3339 or YYYY-MM-DD); the vulnerability is still ignored for this scan, but the ledger returns it to unfixed afterwards
     include-aliases: true                # also apply the vulnerability ID match to aliases/related CVEs (default: false)
     package:
       name: libcurl                      # match by package name (supports regular expressions)
@@ -221,6 +253,19 @@ VEX fields apply when Grype reads VEX data:
 	descriptions.Add(&o.VexAdd, `VEX statuses to consider as ignored rules`)
 	descriptions.Add(&o.MatchUpstreamKernelHeaders, `match kernel-header packages with upstream kernel as kernel vulnerabilities`)
 	descriptions.Add(&o.IncludeMatcherSuppressions, `include matches suppressed internally by matchers (e.g. distro fixed/NAK records, the built-in false-positive list) in the ignored matches output`)
+	descriptions.Add(&o.Ledger, `record this scan's findings into a persistent vulnerability ledger at the given file path.
+The ledger tracks each finding across batches: when it was first seen, the most
+recent batch it was still seen in, whether it is unfixed, fixed, not-affected or
+ignored, and recurrences after a fix. Recording never changes the report, the
+ignore/VEX decisions, or the exit code. Query a ledger with 'grype ledger'.`)
+	descriptions.Add(&o.LedgerImage, `image identity to record in the ledger; defaults to the scan source. Use this to keep
+the identity stable when the same image is scanned from different references.`)
+	descriptions.Add(&o.LedgerBatch, `batch name grouping several scans into one ledger batch; defaults to the image identity.
+Scans recorded under the same batch share a batch identity, and concurrent writes to
+one ledger file are serialized by a file lock, so a multi-image scan can record each
+image as it finishes.`)
+	descriptions.Add(&o.LedgerTimestamps, `write wall-clock timestamps into the ledger. Disabled by default so that recording
+the same scan twice produces byte-identical ledger contents.`)
 }
 
 func (o Grype) FailOnSeverity() *vulnerability.Severity {

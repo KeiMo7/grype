@@ -17,6 +17,7 @@ import (
 	"github.com/anchore/grype/grype/event"
 	"github.com/anchore/grype/grype/event/parsers"
 	"github.com/anchore/grype/grype/grypeerr"
+	"github.com/anchore/grype/grype/ledger"
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/matcher"
 	"github.com/anchore/grype/grype/matcher/dotnet"
@@ -276,7 +277,91 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 
 	log.WithFields("time", time.Since(startTime)).Trace("wrote vulnerability report")
 
+	// Record into the vulnerability ledger (opt-in). This runs after the report is
+	// written and only observes the results: it cannot change the report, the
+	// ignore/VEX decisions, or the exit code. A ledger failure is reported but does
+	// not turn a successful scan into a failed one.
+	if opts.Ledger != "" {
+		if ledgerErr := recordLedger(ctx, opts, imageIdentity(opts, pkgContext, userInput), *remainingMatches, ignoredMatches, vulnMatcher.SuppressedMatches(), status); ledgerErr != nil {
+			log.WithFields("error", ledgerErr).Error("unable to record vulnerability ledger")
+		}
+	}
+
 	return errs
+}
+
+// imageIdentity determines the stable image identity recorded in the ledger.
+func imageIdentity(opts *options.Grype, pkgContext pkg.Context, userInput string) string {
+	if opts.LedgerImage != "" {
+		return opts.LedgerImage
+	}
+	if pkgContext.Source != nil {
+		// Prefer an explicit alias name, then the source's own name, and only fall
+		// back to a description of the source when there is nothing human-readable.
+		// Never include the scan time or DB version.
+		if pkgContext.Source.Name != "" {
+			if pkgContext.Source.Version != "" {
+				return pkgContext.Source.Name + ":" + pkgContext.Source.Version
+			}
+			return pkgContext.Source.Name
+		}
+		if identity := identityFromSourceMetadata(pkgContext.Source.Metadata); identity != "" {
+			return identity
+		}
+		if pkgContext.Source.ID != "" {
+			return pkgContext.Source.ID
+		}
+	}
+	if userInput != "" {
+		// Last resort: the input the user gave. It is stable for repeated scans of
+		// the same target, and does not depend on the scan time or DB version.
+		return userInput
+	}
+	return "unknown"
+}
+
+// identityFromSourceMetadata derives a stable, human-readable identity for scan
+// sources that have no name (literal CPE/PURL inputs, SBOM files, directories).
+func identityFromSourceMetadata(metadata any) string {
+	switch m := metadata.(type) {
+	case pkg.PURLLiteralMetadata:
+		return m.PURL
+	case pkg.CPELiteralMetadata:
+		return m.CPE
+	case pkg.SBOMFileMetadata:
+		if m.Path != "" {
+			return "sbom:" + m.Path
+		}
+	case pkg.ZarfPackageMetadata:
+		if m.Path != "" {
+			return "zarf:" + m.Path
+		}
+	}
+	return ""
+}
+
+// recordLedger writes one image's results into the ledger.
+func recordLedger(ctx context.Context, opts *options.Grype, image string, matches match.Matches, ignoredMatches []match.IgnoredMatch, suppressed []match.IgnoredMatch, status *vulnerability.ProviderStatus) error {
+	batch := opts.LedgerBatch
+	if batch == "" {
+		batch = image
+	}
+	batchID := ledger.BatchID([]string{batch})
+
+	db := ledger.DatabaseFromStatus(status)
+
+	observer := ledger.NewObserver(image)
+	observed := observer.Observe(matches.Sorted(), ignoredMatches, suppressed, db)
+
+	store := ledger.NewStore(opts.Ledger)
+	store.Timestamps = opts.LedgerTimestamps
+
+	summary, err := store.Record(ctx, batchID, image, db, observed)
+	if err != nil {
+		return err
+	}
+	log.Info(summary.String())
+	return nil
 }
 
 func warnWhenDistroHintNeeded(pkgs []pkg.Package, context *pkg.Context) {

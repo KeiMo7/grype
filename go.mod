@@ -79,6 +79,7 @@ require (
 require (
 	github.com/anchore/syft v1.57.2
 	github.com/bmatcuk/doublestar/v4 v4.10.4
+	github.com/gofrs/flock v0.13.1
 	github.com/moby/moby/client v0.6.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 )
