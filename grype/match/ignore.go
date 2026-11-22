@@ -3,6 +3,7 @@ package match
 import (
 	"regexp"
 	"slices"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v2"
 
@@ -40,6 +41,16 @@ type IgnoreRule struct {
 	VexStatus        string            `yaml:"vex-status" json:"vex-status" mapstructure:"vex-status"`
 	VexJustification string            `yaml:"vex-justification" json:"vex-justification" mapstructure:"vex-justification"`
 	MatchType        Type              `yaml:"match-type" json:"match-type" mapstructure:"match-type"`
+
+	// Exemption metadata. These fields bound how long a rule may suppress matches
+	// and record who owns the exemption. They never influence which packages or
+	// vulnerabilities a rule matches, only whether the rule is active at a given
+	// moment. A rule with no exemption metadata at all is a legacy rule and keeps
+	// its previous, unbounded suppression behavior.
+	EffectiveFrom ExemptionTimestamp `yaml:"effective-from" json:"effective-from" mapstructure:"effective-from"`
+	ExpiresOn     ExemptionTimestamp `yaml:"expires-on" json:"expires-on" mapstructure:"expires-on"`
+	Owner         string             `yaml:"owner" json:"owner" mapstructure:"owner"`
+	AssessmentID  string             `yaml:"assessment-id" json:"assessment-id" mapstructure:"assessment-id"`
 }
 
 // IgnoreRulePackage describes the Package-specific fields that comprise the IgnoreRule.
@@ -106,10 +117,20 @@ func (i IgnoreRelatedPackage) IgnoreMatch(m Match) []IgnoreRule {
 // ApplyIgnoreRules returns two collections: the matches that are not being
 // ignored, and the matches that are being ignored. The applicable rules attached
 // to an IgnoredMatch keep the order in which they were provided.
+//
+// Exemptions are evaluated against the system clock; use ApplyIgnoreRulesAt to
+// evaluate them against an explicit moment.
 func ApplyIgnoreRules(matches Matches, rules []IgnoreRule) (Matches, []IgnoredMatch) {
+	return ApplyIgnoreRulesAt(matches, rules, clockNow(SystemClock))
+}
+
+// ApplyIgnoreRulesAt is ApplyIgnoreRules evaluated at an explicit moment in
+// time. Rules whose exemption window has not started or has ended are excluded,
+// so an expired exemption can never suppress a match.
+func ApplyIgnoreRulesAt(matches Matches, rules []IgnoreRule, now time.Time) (Matches, []IgnoredMatch) {
 	// index the rules so each match is only tested against the rules that could apply to it; testing every
 	// match against every rule is quadratic when a large exclusion set is in play
-	matched, ignored := ApplyIgnoreFilters(matches.Sorted(), newIgnoreRuleIndex(rules))
+	matched, ignored := ApplyIgnoreFilters(matches.Sorted(), newIgnoreRuleIndexAt(rules, now))
 	return NewMatches(matched...), ignored
 }
 
@@ -141,11 +162,11 @@ func ApplyIgnoreFilters[T IgnoreFilter](matches []Match, filters ...T) ([]Match,
 	return out, ignoredMatches
 }
 
+// IgnoreMatch returns the rule if it applies to the match right now. An
+// exemption whose window has ended never applies, regardless of how the rule is
+// reached. Use IgnoreMatchAt to evaluate against an explicit moment.
 func (r IgnoreRule) IgnoreMatch(match Match) []IgnoreRule {
-	if conditionsApply(match, r.matchConditions()) {
-		return []IgnoreRule{r}
-	}
-	return nil
+	return r.IgnoreMatchAt(match, clockNow(SystemClock))
 }
 
 // matchConditions returns the conditions a match must meet for the rule to apply, or nil if the rule never

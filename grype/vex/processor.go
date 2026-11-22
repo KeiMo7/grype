@@ -3,6 +3,7 @@ package vex
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/pkg"
@@ -13,6 +14,10 @@ import (
 type Processor struct {
 	Options ProcessorOptions
 	impl    vexProcessorImplementation
+
+	// Clock supplies the current time when deciding whether a time-bound VEX
+	// exemption is active. When nil the system clock is used.
+	Clock match.Clock
 }
 
 type vexProcessorImplementation interface {
@@ -75,10 +80,37 @@ type ProcessorOptions struct {
 	IgnoreRules []match.IgnoreRule
 }
 
+// inactiveExemptionStatus marks a placeholder rule that stands in for configured
+// VEX exemptions that are not active at the moment of evaluation. It can never
+// equal a VEX statement's status, so it never suppresses, but its presence keeps
+// the VEX processors from falling back to their "no rules configured" default,
+// which would otherwise suppress every not_affected/fixed statement and let an
+// expired exemption keep working.
+const inactiveExemptionStatus = "__grype_inactive_exemption__"
+
+// vexRulesEvaluatedAt extracts the VEX ignore rules that are active at now.
+// When VEX rules are configured but none is active, it returns a single inert
+// placeholder so the processors do not apply their default suppression.
+func (vm *Processor) vexRulesEvaluatedAt(now time.Time) []match.IgnoreRule {
+	configured := extractVexRules(vm.Options.IgnoreRules)
+	active := match.ActiveIgnoreRules(configured, now)
+	if len(configured) > 0 && len(active) == 0 {
+		return []match.IgnoreRule{{Namespace: "vex", VexStatus: inactiveExemptionStatus}}
+	}
+	return active
+}
+
 // ApplyVEX receives the results from a scan run and applies any VEX information
 // in the files specified in the grype invocation. Any filtered results will
-// be moved to the ignored matches slice.
+// be moved to the ignored matches slice. Exemptions are evaluated against the
+// processor's clock; use ApplyVEXAt to evaluate them at an explicit moment.
 func (vm *Processor) ApplyVEX(pkgContext *pkg.Context, remainingMatches *match.Matches, ignoredMatches []match.IgnoredMatch) (*match.Matches, []match.IgnoredMatch, error) {
+	return vm.ApplyVEXAt(match.Now(vm.Clock), pkgContext, remainingMatches, ignoredMatches)
+}
+
+// ApplyVEXAt is ApplyVEX evaluated at an explicit moment, so a run uses one
+// clock for both DB and VEX exemption decisions.
+func (vm *Processor) ApplyVEXAt(now time.Time, pkgContext *pkg.Context, remainingMatches *match.Matches, ignoredMatches []match.IgnoredMatch) (*match.Matches, []match.IgnoredMatch, error) {
 	var err error
 
 	// If no VEX documents are loaded, just pass through the matches, effectively NOOP
@@ -92,7 +124,7 @@ func (vm *Processor) ApplyVEX(pkgContext *pkg.Context, remainingMatches *match.M
 		return nil, nil, fmt.Errorf("parsing vex document: %w", err)
 	}
 
-	vexRules := extractVexRules(vm.Options.IgnoreRules)
+	vexRules := vm.vexRulesEvaluatedAt(now)
 
 	remainingMatches, ignoredMatches, err = vm.impl.FilterMatches(
 		rawVexData, vexRules, pkgContext, remainingMatches, ignoredMatches,

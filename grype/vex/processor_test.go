@@ -359,3 +359,63 @@ func TestProcessor_ApplyVEX(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessor_ApplyVEXAt_ExpiredExemptionDoesNotSuppress(t *testing.T) {
+	// A VEX-status exemption that has expired must not suppress through the VEX
+	// path, regardless of what the VEX document says.
+	pkgContext := &pkg.Context{
+		Source: &source.Description{
+			Name:    "alpine",
+			Version: "3.17",
+			Metadata: source.ImageMetadata{
+				RepoDigests: []string{"alpine@sha256:124c7d2707904eea7431fffe91522a01e5a861a624ee31d03372cc1d138a3126"},
+			},
+		},
+	}
+
+	pkgWithID := pkg.Package{
+		ID:        "cc8f90662d91481d",
+		Name:      "libcrypto3",
+		Version:   "3.0.8-r3",
+		Type:      "apk",
+		PURL:      "pkg:apk/alpine/libcrypto3@3.0.8-r3?arch=x86_64&upstream=openssl&distro=alpine-3.17.3",
+		Upstreams: []pkg.UpstreamPackage{{Name: "openssl"}},
+	}
+	vulnMatch := match.Match{
+		Vulnerability: vulnerability.Vulnerability{
+			Reference: vulnerability.Reference{ID: "CVE-2023-1255", Namespace: "alpine:distro:alpine:3.17"},
+			Fix:       vulnerability.Fix{Versions: []string{"3.0.8-r4"}, State: vulnerability.FixStateFixed},
+		},
+		Package: pkgWithID,
+	}
+	matches := match.NewMatches(vulnMatch)
+
+	options := ProcessorOptions{
+		Documents: []string{"testdata/vex-docs/csaf-demo1.json"},
+		IgnoreRules: []match.IgnoreRule{{
+			VexStatus:     string(status.Fixed),
+			EffectiveFrom: "2025-01-01T00:00:00Z",
+			ExpiresOn:     "2025-01-31T00:00:00Z",
+			Owner:         "security-team",
+			Reason:        "fixed via VEX",
+			AssessmentID:  "ASMT-1",
+		}},
+	}
+
+	processor, err := NewProcessor(options)
+	require.NoError(t, err)
+
+	inWindow, err := match.ParseExemptionTime("2025-01-15T00:00:00Z")
+	require.NoError(t, err)
+	remaining, ignored, err := processor.ApplyVEXAt(inWindow, pkgContext, &matches, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, remaining.Count(), "the exemption should suppress inside its window")
+	require.Len(t, ignored, 1)
+
+	afterExpiry, err := match.ParseExemptionTime("2025-02-01T00:00:00Z")
+	require.NoError(t, err)
+	remaining, ignored, err = processor.ApplyVEXAt(afterExpiry, pkgContext, &matches, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, remaining.Count(), "the match must return once the VEX exemption expires")
+	assert.Empty(t, ignored)
+}

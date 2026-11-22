@@ -8,6 +8,7 @@ import (
 	"github.com/anchore/grype/grype/match"
 	"github.com/anchore/grype/grype/vulnerability"
 	"github.com/anchore/grype/internal/format"
+	"github.com/anchore/grype/internal/log"
 	"github.com/anchore/syft/syft/source"
 )
 
@@ -25,6 +26,7 @@ type Grype struct {
 	Platform                   string             `yaml:"platform" json:"platform" mapstructure:"platform"`                                     // --platform, override the target platform for a container image
 	Search                     search             `yaml:"search" json:"search" mapstructure:"search"`
 	Ignore                     []match.IgnoreRule `yaml:"ignore" json:"ignore" mapstructure:"ignore"`
+	ExemptionWarningDays       int                `yaml:"exemption-warning-days" json:"exemption-warning-days" mapstructure:"exemption-warning-days"` // days before an exemption expires that it is reported as expiring
 	Exclusions                 []string           `yaml:"exclude" json:"exclude" mapstructure:"exclude"`
 	ExternalSources            externalSources    `yaml:"external-sources" json:"externalSources" mapstructure:"external-sources"`
 	Match                      matchConfig        `yaml:"match" json:"match" mapstructure:"match"`
@@ -74,6 +76,7 @@ func DefaultGrype(id clio.Identification) *Grype {
 		MatchUpstreamKernelHeaders: false,
 		IncludeMatcherSuppressions: false,
 		SortBy:                     defaultSortBy(),
+		ExemptionWarningDays:       match.DefaultExemptionWarningDays,
 		Timestamp:                  true,
 		Alerts:                     defaultAlerts(),
 	}
@@ -175,6 +178,47 @@ func (o *Grype) PostLoad() error {
 			return fmt.Errorf("bad --fail-on severity value '%s'", o.FailOn)
 		}
 	}
+
+	if o.ExemptionWarningDays < 0 {
+		return fmt.Errorf("bad exemption-warning-days value %d: must be zero or greater", o.ExemptionWarningDays)
+	}
+
+	// A malformed window (bad date, inverted bounds, missing bound) refuses the
+	// whole configuration instead of silently degrading to an unbounded,
+	// permanent suppression. An entry missing its owner or other attribution is
+	// rejected on its own: it stays in the list so the report can point at its
+	// position, but it is never active, so it cannot suppress a match.
+	issues, err := match.ValidateIgnoreRulesConfig(o.Ignore)
+	if err != nil {
+		return fmt.Errorf("invalid ignore rules: %w", err)
+	}
+	for _, issue := range issues {
+		log.WithFields(
+			"ignore", issue.Position,
+			"vulnerability", issue.Rule.Vulnerability,
+			"reason", issue.Err,
+		).Warn("rejecting ignore rule; it will not suppress any match")
+	}
+
+	// Resolve rules written before exemption windows existed. Legacy rules keep
+	// their previous suppression behavior and are listed (by position) as needing
+	// migration; the report surfaces them as missing metadata. Malformed windows
+	// were already rejected above, so migration cannot produce a half-migrated
+	// list here; the function's atomic-failure contract protects other callers.
+	migrated, pending, migrationErrs := match.MigrateIgnoreRules(o.Ignore)
+	if len(migrationErrs) > 0 {
+		for _, err := range migrationErrs {
+			return fmt.Errorf("invalid ignore rules: %w", err)
+		}
+	}
+	o.Ignore = migrated
+	for _, position := range pending {
+		// listed in the report as missing metadata; keep stderr quiet so the
+		// behavior of existing configurations is unchanged
+		log.WithFields("ignore", position, "vulnerability", o.Ignore[position].Vulnerability).
+			Debug("legacy exemption has no effective-from/expires-on and is listed as missing metadata")
+	}
+
 	return nil
 }
 
@@ -217,9 +261,24 @@ This is the full set of supported rule fields:
 VEX fields apply when Grype reads VEX data:
   - vex-status: not_affected
     vex-justification: vulnerable_code_not_present
+
+An ignore rule can be time-bound. effective-from and expires-on are required
+together when any exemption metadata is present, and the exemption stops
+suppressing matches at expires-on. Time-bound rules must also name an owner,
+record a reason, and cite the assessment that justified them:
+  - vulnerability: CVE-2021-44228
+    effective-from: 2025-01-01T00:00:00Z
+    expires-on: 2025-06-30T00:00:00Z
+    owner: security-team
+    reason: "reachable only via an isolated component"
+    assessment-id: ASMT-1234
+  - packages are matched independently: one expired rule never affects another.
+  - rules without any exemption metadata are legacy rules; they keep suppressing
+    and are listed in the report as needing migration to a time-bound form.
 `)
 	descriptions.Add(&o.VexAdd, `VEX statuses to consider as ignored rules`)
 	descriptions.Add(&o.MatchUpstreamKernelHeaders, `match kernel-header packages with upstream kernel as kernel vulnerabilities`)
+	descriptions.Add(&o.ExemptionWarningDays, `how many days before an exemption expires it is reported as expiring (default 14; 0 disables the warning)`)
 	descriptions.Add(&o.IncludeMatcherSuppressions, `include matches suppressed internally by matchers (e.g. distro fixed/NAK records, the built-in false-positive list) in the ignored matches output`)
 }
 

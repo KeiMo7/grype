@@ -202,6 +202,11 @@ func (p *Presenter) getRows(doc models.Document, showSuppressed bool) rows {
 					}
 				}
 			}
+			// name when the exemption that suppressed this match expires, so the
+			// suppressed view answers "until when" without consulting the JSON
+			if annotation := models.ExemptionExpiryAnnotation(m.AppliedIgnoreRules); annotation != "" {
+				msg += ": " + annotation
+			}
 			rs = append(rs, p.newRow(m.Match, msg, multipleDistros))
 		}
 	}

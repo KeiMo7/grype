@@ -180,7 +180,7 @@ func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, advMatch *advis
 		if rule.HasConditions() {
 			r := rule
 			r.VexStatus = ""
-			if len(r.IgnoreMatch(m)) == 0 {
+			if !r.MatchesCriteria(m) {
 				continue
 			}
 		}

@@ -21,6 +21,20 @@ type Document struct {
 	Source          *source         `json:"source"`
 	Distro          distribution    `json:"distro"`
 	Descriptor      descriptor      `json:"descriptor"`
+
+	// Exemptions records the state of every configured exemption at scan time so
+	// the report can answer "which exemption suppressed this match, and when does
+	// it expire", and list exemptions that need migration. It is omitted when no
+	// exemptions are configured, preserving the previous output shape.
+	Exemptions []ExemptionReport `json:"exemptions,omitempty"`
+}
+
+// WithExemptions attaches the exemption report to the document. It is separate
+// from NewDocument so the existing constructor signature and output shape for
+// scans without exemptions are unchanged.
+func (d Document) WithExemptions(summaries []match.ExemptionSummary) Document {
+	d.Exemptions = NewExemptionReport(summaries)
+	return d
 }
 
 // NewDocument creates and populates a new Document struct, representing the populated JSON document.
@@ -74,6 +88,7 @@ func NewDocument(id clio.Identification, packages []pkg.Package, context pkg.Con
 		ignoredMatch := IgnoredMatch{
 			Match:              *matchModel,
 			AppliedIgnoreRules: mapIgnoreRules(m.AppliedIgnoreRules),
+			Exemption:          newAppliedExemption(m.AppliedIgnoreRules),
 		}
 		ignoredMatchModels = append(ignoredMatchModels, ignoredMatch)
 	}

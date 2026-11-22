@@ -342,7 +342,7 @@ func matchingRule(ignoreRules []match.IgnoreRule, m match.Match, statement *open
 		if rule.HasConditions() {
 			r := rule
 			r.VexStatus = ""
-			if len(r.IgnoreMatch(m)) == 0 {
+			if !r.MatchesCriteria(m) {
 				continue
 			}
 		}

@@ -135,6 +135,10 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 	var s *sbom.SBOM
 	var pkgContext pkg.Context
 
+	// snapshot the user-configured rules before flags add grype's built-in ones,
+	// so exemption reporting covers only the operator's exemptions
+	configuredIgnoreRules := append([]match.IgnoreRule(nil), opts.Ignore...)
+
 	if opts.OnlyFixed {
 		opts.Ignore = append(opts.Ignore, ignoreNonFixedMatches...)
 	}
@@ -231,6 +235,8 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 		FailSeverity:          opts.FailOnSeverity(),
 		Matchers:              getMatchers(opts),
 		VexProcessor:          vexProcessor,
+		ExemptionWarningDays:  opts.ExemptionWarningDays,
+		ConfiguredIgnoreRules: configuredIgnoreRules,
 		Alerts: grype.AlertsConfig{
 			EnableEOLDistroWarnings: opts.Alerts.EnableEOLDistroWarnings,
 		},
@@ -264,6 +270,11 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 	if err != nil {
 		return fmt.Errorf("failed to create document: %w", err)
 	}
+
+	// record every configured exemption's state as of the same clock the matcher
+	// used, including expired and un-migrated ones, so the report can answer why
+	// a match was suppressed and when that answer stops being true
+	model = model.WithExemptions(vulnMatcher.ExemptionSummary())
 
 	if err = writer.Write(models.PresenterConfig{
 		ID:       app.ID(),

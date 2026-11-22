@@ -1,5 +1,7 @@
 package match
 
+import "time"
+
 // ignoreRuleIndex is an IgnoreFilter over an ordered list of IgnoreRules. For any match it returns the same
 // rules, in the same order, as calling IgnoreMatch on every rule in the list, but it only evaluates the rules
 // that could apply to that match.
@@ -35,11 +37,22 @@ type indexedIgnoreRule struct {
 var _ IgnoreFilter = (*ignoreRuleIndex)(nil)
 
 func newIgnoreRuleIndex(rules []IgnoreRule) ignoreRuleIndex {
+	return newIgnoreRuleIndexAt(rules, clockNow(SystemClock))
+}
+
+// newIgnoreRuleIndexAt builds the index as of now, leaving out rules that cannot
+// apply at that moment, including rules whose exemption window is pending, has
+// expired, or is malformed. Filtering at build time keeps a rule's matching
+// scope unchanged: only whole rules are dropped, never widened.
+func newIgnoreRuleIndexAt(rules []IgnoreRule, now time.Time) ignoreRuleIndex {
 	index := ignoreRuleIndex{
 		byVulnerabilityID: make(map[string][]indexedIgnoreRule),
 		byAliasID:         make(map[string][]indexedIgnoreRule),
 	}
 	for i, rule := range rules {
+		if !rule.ActiveAt(now) {
+			continue
+		}
 		conditions := rule.matchConditions()
 		if len(conditions) == 0 {
 			continue
