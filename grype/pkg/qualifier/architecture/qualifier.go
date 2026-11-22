@@ -203,3 +203,12 @@ func DefaultAliases() map[string]string {
 	}
 	return out
 }
+
+// Canonicalize folds an architecture string onto its canonical token using the given alias
+// table (falling back to the built-in table when it is empty). It is exported for callers
+// outside match qualification — such as deterministic result deduplication — that need the
+// same dialect reconciliation (x86_64 vs amd64) without constructing a qualifier. A spelling
+// absent from the table resolves to itself.
+func Canonicalize(arch string, aliases map[string]string) string {
+	return canonicalArch(arch, aliases)
+}

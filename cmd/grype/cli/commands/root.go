@@ -224,6 +224,11 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 		return fmt.Errorf("failed to create VEX processor: %w", err)
 	}
 
+	dedupCfg, err := opts.Dedup.ToDedupConfig()
+	if err != nil {
+		return err
+	}
+
 	vulnMatcher := grype.VulnerabilityMatcher{
 		VulnerabilityProvider: vp,
 		IgnoreRules:           opts.Ignore,
@@ -235,6 +240,7 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 			EnableEOLDistroWarnings: opts.Alerts.EnableEOLDistroWarnings,
 		},
 		IncludeMatcherSuppressions: opts.IncludeMatcherSuppressions,
+		DedupConfig:                dedupCfg,
 	}
 
 	remainingMatches, ignoredMatches, err := vulnMatcher.FindMatchesContext(ctx, packages, pkgContext)
@@ -247,6 +253,12 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 
 	log.WithFields("time", time.Since(startTime)).Info("found vulnerability matches")
 	startTime = time.Now()
+
+	if opts.Dedup.AuditReport != "" && vulnMatcher.LastDedupReport != nil {
+		if err := writeDedupAuditReport(opts.Dedup.AuditReport, *vulnMatcher.LastDedupReport); err != nil {
+			return fmt.Errorf("failed to write dedup audit report: %w", err)
+		}
+	}
 
 	// clear out the registry auth information to avoid including possibly sensitive information in the report
 	opts.Registry.Auth = nil

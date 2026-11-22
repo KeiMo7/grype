@@ -17,6 +17,33 @@ type Match struct {
 	RelatedVulnerabilities []VulnerabilityMetadata `json:"relatedVulnerabilities"`
 	MatchDetails           []MatchDetails          `json:"matchDetails"`
 	Artifact               Package                 `json:"artifact"`
+	// Merge explains second-stage finding dedup when this finding absorbed one or more
+	// separate findings. It is omitted for ordinary findings and entirely absent in legacy
+	// dedup mode, so existing report shapes are unchanged.
+	Merge *Merge `json:"merge,omitempty"`
+}
+
+// Merge is the JSON projection of the second-stage dedup audit on one finding.
+type Merge struct {
+	// Reason names the configured identity rule that grouped the merged findings.
+	Reason string `json:"reason,omitempty"`
+	// MergedFrom lists every finding folded into this one.
+	MergedFrom []MergedRecord `json:"mergedFrom,omitempty"`
+	// PathsTruncated indicates the unioned discovery paths exceeded the configured limit.
+	PathsTruncated bool `json:"pathsTruncated,omitempty"`
+	// PathsDropped counts discovery paths removed by truncation.
+	PathsDropped int `json:"pathsDropped,omitempty"`
+}
+
+// MergedRecord describes one finding folded into a surviving match.
+type MergedRecord struct {
+	Fingerprint    string   `json:"fingerprint"`
+	PackageVersion string   `json:"packageVersion,omitempty"`
+	Constraint     string   `json:"constraint,omitempty"`
+	FixVersions    []string `json:"fixVersions,omitempty"`
+	Paths          []string `json:"paths,omitempty"`
+	Status         string   `json:"status,omitempty"`
+	Unaffected     bool     `json:"unaffected,omitempty"`
 }
 
 // MatchDetails contains all data that indicates how the result match was found
@@ -70,12 +97,48 @@ func newMatch(m match.Match, p pkg.Package, metadataProvider vulnerability.Metad
 		}
 	}
 
+	artifact := newPackage(p)
+	if m.MergeAudit != nil {
+		// second-stage finding dedup unions the discovery paths of every folded package onto the
+		// survivor match. The passed package is looked up by ID and carries only one record's
+		// paths, so report the match's own unioned LocationSet instead. Legacy-mode findings have
+		// no MergeAudit and keep the package-derived locations unchanged.
+		artifact.Locations = m.Package.Locations.ToSlice()
+	}
+
 	return &Match{
 		Vulnerability:          NewVulnerability(m.Vulnerability, metadata, format),
-		Artifact:               newPackage(p),
+		Artifact:               artifact,
 		RelatedVulnerabilities: relatedVulnerabilities,
 		MatchDetails:           details,
+		Merge:                  newMerge(m.MergeAudit),
 	}, nil
+}
+
+// newMerge projects the internal dedup audit onto the JSON model. It returns nil for ordinary
+// findings (and all legacy-mode output) so the field is omitted from reports.
+func newMerge(audit *match.MergeAudit) *Merge {
+	if audit == nil {
+		return nil
+	}
+	merged := make([]MergedRecord, 0, len(audit.MergedFrom))
+	for _, r := range audit.MergedFrom {
+		merged = append(merged, MergedRecord{
+			Fingerprint:    r.Fingerprint,
+			PackageVersion: r.PackageVersion,
+			Constraint:     r.Constraint,
+			FixVersions:    r.FixVersions,
+			Paths:          r.Paths,
+			Status:         r.Status,
+			Unaffected:     r.Unaffected,
+		})
+	}
+	return &Merge{
+		Reason:         audit.Reason,
+		MergedFrom:     merged,
+		PathsTruncated: audit.PathsTruncated,
+		PathsDropped:   audit.PathsDropped,
+	}
 }
 
 func getFix(m match.Match, p pkg.Package, format version.Format) *FixDetails {

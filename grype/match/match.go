@@ -19,6 +19,45 @@ type Match struct {
 	Vulnerability vulnerability.Vulnerability // The vulnerability details of the match.
 	Package       pkg.Package                 // The package used to search for a match.
 	Details       Details                     // all the ways this particular match was made.
+
+	// MergeAudit records second-stage finding deduplication (grype/match/dedup): which
+	// separate findings were folded into this one and why. It is nil on matches that were not
+	// produced by a merge, including every match under the default legacy mode, so existing
+	// output stays unchanged.
+	MergeAudit *MergeAudit
+}
+
+// MergeAudit explains one second-stage merge: the rule that grouped the findings, the records
+// folded in, and any truncation applied while collecting their paths.
+type MergeAudit struct {
+	// Reason is the configured identity rule that made the group one finding.
+	Reason string `json:"reason,omitempty"`
+	// MergedFrom lists every finding folded into the surviving match, strongest record excluded.
+	MergedFrom []MergedRecord `json:"mergedFrom,omitempty"`
+	// PathsTruncated is set when the unioned discovery paths exceeded the configured limit.
+	PathsTruncated bool `json:"pathsTruncated,omitempty"`
+	// PathsDropped counts paths removed by truncation.
+	PathsDropped int `json:"pathsDropped,omitempty"`
+}
+
+// MergedRecord captures the identity and reconciliation-relevant fields of one finding folded
+// into the survivor of a second-stage merge, so an auditor can see exactly what was combined.
+type MergedRecord struct {
+	// Fingerprint is the pre-merge fingerprint of the folded finding.
+	Fingerprint string `json:"fingerprint"`
+	// PackageVersion is the version of the folded finding's package.
+	PackageVersion string `json:"packageVersion,omitempty"`
+	// Constraint is the raw version constraint of the folded vulnerability record, when known.
+	Constraint string `json:"constraint,omitempty"`
+	// FixVersions are the fixed-in versions the folded record carried.
+	FixVersions []string `json:"fixVersions,omitempty"`
+	// Paths are the discovery paths (RealPath, with AccessPath annotated when it differs)
+	// the folded finding contributed before union/truncation.
+	Paths []string `json:"paths,omitempty"`
+	// Status is the vulnerability record status of the folded finding.
+	Status string `json:"status,omitempty"`
+	// Unaffected marks records that declared the package not affected.
+	Unaffected bool `json:"unaffected,omitempty"`
 }
 
 // String is the string representation of select match fields.
@@ -51,6 +90,26 @@ func (m *Match) Merge(other Match) error {
 		return ErrCannotMerge
 	}
 
+	mergeFields(m, other)
+
+	return nil
+}
+
+// MergeFields folds other into m as records of one finding without the equal-fingerprint
+// precondition of Merge. It exists for second-stage result deduplication
+// (grype/match/dedup), whose configured identity can group matches carrying different
+// fingerprints. Callers must have already established that both records describe the same
+// finding; ordinary collection code should keep using Merge.
+func (m *Match) MergeFields(other Match) {
+	mergeFields(m, other)
+}
+
+// mergeFields folds another record describing the same finding into the receiver without a
+// fingerprint check. It is shared by Merge (same fingerprint) and by second-stage finding
+// deduplication (grype/match/dedup), which groups records on a configured identity that can
+// span several fingerprints. Callers are responsible for deciding the records are the same
+// finding; everything here is field reconciliation, unchanged from Merge's body.
+func mergeFields(m *Match, other Match) {
 	// the record that matched most strongly describes the finding; the other only feeds the unions below
 	base, secondary := m.Vulnerability, other.Vulnerability
 	if compareRecordAuthority(other, *m) < 0 {
@@ -78,8 +137,6 @@ func (m *Match) Merge(other Match) error {
 
 	m.Vulnerability = base
 	m.Details = mergeDetails(m.Details, other.Details)
-
-	return nil
 }
 
 // compareRecordAuthority orders two matches for the same finding by how well each describes it, best
@@ -91,6 +148,15 @@ func (m *Match) Merge(other Match) error {
 //   - the tiebreak compares only fields the winner keeps intact, so they read the same on a merged
 //     record as on an input. Detail sets cannot serve here: merging unions them, so a third record
 //     would be compared against a set that was never an input, and the winner would depend on order.
+//
+// CompareRecordAuthority exposes the record-authority ordering used by Merge for second-stage
+// result deduplication (grype/match/dedup), which must select the same strongest record when
+// merging matches that do not share a fingerprint. It returns a negative value when a is the
+// stronger record, zero when they tie, positive when b is stronger.
+func CompareRecordAuthority(a, b Match) int {
+	return compareRecordAuthority(a, b)
+}
+
 func compareRecordAuthority(a, b Match) int {
 	if c := cmp.Compare(a.Details.rank(), b.Details.rank()); c != 0 {
 		return c

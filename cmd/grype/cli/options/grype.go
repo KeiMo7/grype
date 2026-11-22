@@ -28,6 +28,7 @@ type Grype struct {
 	Exclusions                 []string           `yaml:"exclude" json:"exclude" mapstructure:"exclude"`
 	ExternalSources            externalSources    `yaml:"external-sources" json:"externalSources" mapstructure:"external-sources"`
 	Match                      matchConfig        `yaml:"match" json:"match" mapstructure:"match"`
+	Dedup                      dedupConfig        `yaml:"dedup" json:"dedup" mapstructure:"dedup"`
 	FailOn                     string             `yaml:"fail-on-severity" json:"fail-on-severity" mapstructure:"fail-on-severity"`
 	Registry                   registry           `yaml:"registry" json:"registry" mapstructure:"registry"`
 	ShowSuppressed             bool               `yaml:"show-suppressed" json:"show-suppressed" mapstructure:"show-suppressed"`
@@ -68,6 +69,7 @@ func DefaultGrype(id clio.Identification) *Grype {
 			DB: DefaultDatabase(id),
 		},
 		Match:                      defaultMatchConfig(),
+		Dedup:                      defaultDedupConfig(),
 		ExternalSources:            defaultExternalSources(),
 		CheckForAppUpdate:          true,
 		VexAdd:                     []string{},
@@ -221,6 +223,7 @@ VEX fields apply when Grype reads VEX data:
 	descriptions.Add(&o.VexAdd, `VEX statuses to consider as ignored rules`)
 	descriptions.Add(&o.MatchUpstreamKernelHeaders, `match kernel-header packages with upstream kernel as kernel vulnerabilities`)
 	descriptions.Add(&o.IncludeMatcherSuppressions, `include matches suppressed internally by matchers (e.g. distro fixed/NAK records, the built-in false-positive list) in the ignored matches output`)
+	o.Dedup.DescribeFields(descriptions)
 }
 
 func (o Grype) FailOnSeverity() *vulnerability.Severity {
