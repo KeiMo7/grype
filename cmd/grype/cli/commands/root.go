@@ -274,6 +274,14 @@ func runGrype(ctx context.Context, app clio.Application, opts *options.Grype, us
 		errs = appendErrors(errs, err)
 	}
 
+	// the remediation plan is computed on top of the final matches only; when the
+	// option is unset (the default) nothing here runs and output is unchanged
+	if opts.RemediationPlan != "" {
+		if err := writeRemediationPlan(opts.RemediationPlan, *remainingMatches); err != nil {
+			errs = appendErrors(errs, err)
+		}
+	}
+
 	log.WithFields("time", time.Since(startTime)).Trace("wrote vulnerability report")
 
 	return errs

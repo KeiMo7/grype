@@ -42,6 +42,7 @@ type Grype struct {
 	MatchUpstreamKernelHeaders bool               `yaml:"match-upstream-kernel-headers" json:"match-upstream-kernel-headers" mapstructure:"match-upstream-kernel-headers"` // Show matches on kernel-headers packages where the match is on kernel upstream instead of marking them as ignored, default=false
 	FixChannel                 FixChannels        `yaml:"fix-channel" json:"fix-channel" mapstructure:"fix-channel"`                                                       // the fix channels to apply to the distro when matching
 	Timestamp                  bool               `yaml:"timestamp" json:"timestamp" mapstructure:"timestamp"`
+	RemediationPlan            string             `yaml:"remediation-plan" json:"remediation-plan" mapstructure:"remediation-plan"` // --remediation-plan, write an ordered upgrade plan built on top of the results to the given file (empty disables)
 	Alerts                     Alerts             `yaml:"alerts" json:"alerts" mapstructure:"alerts"`
 	DatabaseCommand            `yaml:",inline" json:",inline" mapstructure:",squash"`
 }
@@ -163,6 +164,11 @@ func (o *Grype) AddFlags(flags clio.FlagSet) {
 	flags.StringArrayVarP(&o.VexDocuments,
 		"vex", "",
 		"a list of VEX documents to consider when producing scanning results",
+	)
+
+	flags.StringVarP(&o.RemediationPlan,
+		"remediation-plan", "",
+		"write a remediation plan (ordered upgrade targets with residual findings) to the given file ('-' for stdout); disabled by default",
 	)
 }
 

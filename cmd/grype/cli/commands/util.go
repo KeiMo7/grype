@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +17,31 @@ import (
 
 	"github.com/anchore/clio"
 	"github.com/anchore/grype/cmd/grype/internal/ui"
+	"github.com/anchore/grype/grype/match"
+	"github.com/anchore/grype/grype/remediation"
 )
+
+// writeRemediationPlan computes the remediation plan for the final matches and
+// writes it as JSON. The plan is fully built and encoded in memory before
+// anything is written, so a failure never leaves a half-written plan behind.
+func writeRemediationPlan(path string, matches match.Matches) error {
+	plan := remediation.NewPlan(matches)
+
+	data, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode remediation plan: %w", err)
+	}
+	data = append(data, '\n')
+
+	if path == "-" {
+		_, err := os.Stdout.Write(data)
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("unable to write remediation plan: %w", err)
+	}
+	return nil
+}
 
 func disableUI(app clio.Application) func(*cobra.Command, []string) error {
 	return func(_ *cobra.Command, _ []string) error {
