@@ -40,16 +40,17 @@ func newFuzzyConstraint(phrase, hint string) (fuzzyConstraint, error) {
 	// check all version unit phrases to see if this is a valid semver constraint
 	valid := true
 check:
-	for _, units := range constraints.Units {
-		for _, unit := range units {
-			if !pseudoSemverPattern.MatchString(unit.Version) {
-				valid = false
-				break check
-			}
+	for _, unit := range constraints.leaves() {
+		if !pseudoSemverPattern.MatchString(unit.Version) {
+			valid = false
+			break check
 		}
 	}
 
-	if value, err := hashiVer.NewConstraint(phrase); err == nil && valid {
+	// The external semantic-version constraint library understands the
+	// historical flat syntax but not grouping or exclusion. Only take that fast
+	// path when the expression is flat and every leaf is semver-like.
+	if value, err := hashiVer.NewConstraint(phrase); err == nil && valid && constraints.simple {
 		semverConstraint = &value
 	}
 

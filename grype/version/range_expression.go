@@ -2,42 +2,73 @@ package version
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"text/scanner"
 )
 
+// simpleRangeExpression is a parsed version constraint expression.
+//
+// The historical flat "comma AND, double-pipe OR" syntax is still represented
+// by Units. Expressions that use grouping or exclusion additionally carry an
+// immutable expression tree in root, which is what evaluation always uses.
 type simpleRangeExpression struct {
-	Units [][]rangeUnit // only supports or'ing a group of and'ed groups
+	// Units is the legacy OR-of-AND-groups representation. It is only
+	// populated for expressions that use the historical flat syntax; it is nil
+	// for expressions with grouping or exclusion.
+	Units [][]rangeUnit
+
+	root   *expressionNode
+	simple bool
 }
 
 func parseRangeExpression(phrase string) (simpleRangeExpression, error) {
-	orParts, err := scanExpression(phrase)
+	root, simple, err := parseConstraintExpression(phrase)
 	if err != nil {
 		return simpleRangeExpression{}, fmt.Errorf("unable to create constraint expression from=%q : %w", phrase, err)
 	}
 
-	orUnits := make([][]rangeUnit, len(orParts))
-	var fuzzyErr error
-	for orIdx, andParts := range orParts {
-		andUnits := make([]rangeUnit, len(andParts))
-		for andIdx, part := range andParts {
-			unit, err := parseRange(part)
-			if err != nil {
-				return simpleRangeExpression{}, err
-			}
-			if unit == nil {
-				return simpleRangeExpression{}, fmt.Errorf("unable to parse unit: %q", part)
-			}
-			andUnits[andIdx] = *unit
-		}
+	expr := simpleRangeExpression{
+		root:   root,
+		simple: simple,
+	}
+	if simple {
+		expr.Units = legacyUnits(root)
+	}
+	return expr, nil
+}
 
-		orUnits[orIdx] = andUnits
+// legacyUnits converts a flat expression tree back into the historical
+// OR-of-AND-groups representation.
+func legacyUnits(root *expressionNode) [][]rangeUnit {
+	if root == nil {
+		return nil
 	}
 
-	return simpleRangeExpression{
-		Units: orUnits,
-	}, fuzzyErr
+	var groups []expressionNode
+	if root.kind == nodeOr {
+		groups = root.children
+	} else {
+		groups = []expressionNode{*root}
+	}
+
+	units := make([][]rangeUnit, 0, len(groups))
+	for i := range groups {
+		group := &groups[i]
+		var groupUnits []rangeUnit
+		if group.kind == nodeAnd {
+			for _, child := range group.children {
+				if child.kind == nodeLeaf {
+					groupUnits = append(groupUnits, child.unit)
+				}
+			}
+		} else if group.kind == nodeLeaf {
+			groupUnits = append(groupUnits, group.unit)
+		}
+		units = append(units, groupUnits)
+	}
+	return units
 }
 
 func (c *simpleRangeExpression) satisfied(format Format, version *Version) (bool, error) {
@@ -49,39 +80,158 @@ func (c *simpleRangeExpression) satisfied(format Format, version *Version) (bool
 	return c.satisfiedWithConfig(format, version, cfg)
 }
 
+// Equal reports whether two parsed expressions are equivalent. It exists so
+// the expression value stays comparable (e.g. via go-cmp) despite the parsed
+// tree being an internal, unexported structure.
+func (c simpleRangeExpression) Equal(other simpleRangeExpression) bool {
+	left, right := c.leaves(), other.leaves()
+	if (c.root == nil) != (other.root == nil) {
+		return false
+	}
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return structuralEqual(c.root, other.root)
+}
+
+func structuralEqual(a, b *expressionNode) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.kind != b.kind || a.unit != b.unit || len(a.children) != len(b.children) {
+		return false
+	}
+	for i := range a.children {
+		if !structuralEqual(&a.children[i], &b.children[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *simpleRangeExpression) satisfiedWithConfig(format Format, version *Version, cfg ComparisonConfig) (bool, error) {
-	oneSatisfied := false
-	for i, andOperand := range c.Units {
+	if c.root == nil || version == nil {
+		return false, nil
+	}
+
+	return c.root.satisfied(evaluationContext{
+		format:  format,
+		version: version,
+		cfg:     cfg,
+	})
+}
+
+// leaves returns every leaf term in the expression, in left-to-right order.
+func (c *simpleRangeExpression) leaves() []rangeUnit {
+	if c.root == nil {
+		return nil
+	}
+	return c.root.leaves()
+}
+
+// evaluationContext carries everything a leaf needs to be evaluated. Each leaf
+// uses the comparison configuration supplied by the caller, so a missing-epoch
+// strategy applies at every depth of the expression rather than only at the
+// outermost level.
+type evaluationContext struct {
+	format  Format
+	version *Version
+	cfg     ComparisonConfig
+}
+
+func (n *expressionNode) satisfied(ctx evaluationContext) (bool, error) {
+	switch n.kind {
+	case nodeLeaf:
+		return n.satisfiedLeaf(ctx)
+	case nodeAnd:
 		allSatisfied := true
-		for j, andUnit := range andOperand {
-			constraintVersion := &Version{
-				Format: format,
-				Raw:    andUnit.Version,
-			}
-
-			var result int
-			var err error
-
-			// Use config-aware comparison for RPM and Deb formats when config is provided
-			if cfg.MissingEpochStrategy != "" && (format == RpmFormat || format == DebFormat) {
-				result, err = compareWithConfig(version, constraintVersion, cfg)
-			} else {
-				result, err = version.Compare(constraintVersion)
-			}
-
+		for i := range n.children {
+			ok, err := n.children[i].satisfied(ctx)
 			if err != nil {
-				return false, fmt.Errorf("uncomparable %T vs %q: %w", andUnit, version.String(), err)
+				return false, err
 			}
-			unit := c.Units[i][j]
-
-			if !unit.Satisfied(result) {
+			if !ok {
 				allSatisfied = false
 			}
 		}
-
-		oneSatisfied = oneSatisfied || allSatisfied
+		return allSatisfied, nil
+	case nodeOr:
+		oneSatisfied := false
+		for i := range n.children {
+			ok, err := n.children[i].satisfied(ctx)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				oneSatisfied = true
+			}
+		}
+		return oneSatisfied, nil
+	case nodeNot:
+		ok, err := n.children[0].satisfied(ctx)
+		if err != nil {
+			return false, err
+		}
+		return !ok, nil
+	default:
+		return false, fmt.Errorf("unknown expression node")
 	}
-	return oneSatisfied, nil
+}
+
+func (n *expressionNode) satisfiedLeaf(ctx evaluationContext) (bool, error) {
+	constraintVersion := &Version{
+		Format: ctx.format,
+		Raw:    n.unit.Version,
+	}
+
+	var result int
+	var err error
+
+	// Use config-aware comparison for RPM and Deb formats when config is provided
+	if ctx.cfg.MissingEpochStrategy != "" && (ctx.format == RpmFormat || ctx.format == DebFormat) {
+		result, err = compareWithConfig(ctx.version, constraintVersion, ctx.cfg)
+	} else {
+		result, err = ctx.version.Compare(constraintVersion)
+	}
+
+	if err != nil {
+		// A version format that cannot be compared is a property of this single
+		// leaf, not of the whole expression: treat the leaf as unsatisfied and
+		// leave an observable diagnostic instead of failing the evaluation.
+		// Other comparison errors (for example an unparseable version value) keep
+		// propagating so existing behavior is preserved.
+		var unsupported *UnsupportedComparisonError
+		if errors.As(err, &unsupported) {
+			reportDiagnostic(Diagnostic{
+				Kind:       UnsupportedComparisonDiagnostic,
+				Expression: n.unit.Version,
+				Message:    unsupported.Error(),
+			})
+			return false, nil
+		}
+		return false, fmt.Errorf("uncomparable %q vs %q: %w", n.unit.Version, ctx.version.String(), err)
+	}
+
+	return n.unit.Satisfied(result), nil
+}
+
+func (n *expressionNode) leaves() []rangeUnit {
+	if n == nil {
+		return nil
+	}
+	if n.kind == nodeLeaf {
+		return []rangeUnit{n.unit}
+	}
+	var out []rangeUnit
+	for i := range n.children {
+		out = append(out, n.children[i].leaves()...)
+	}
+	return out
 }
 
 // compareWithConfig performs a version comparison using the provided configuration.
@@ -105,6 +255,9 @@ func compareWithConfig(version *Version, constraintVersion *Version, cfg Compari
 	}
 }
 
+// scanExpression is the legacy flat tokenizer retained for compatibility with
+// callers (and tests) that inspect the pre-grouping representation. New code
+// should use parseRangeExpression / parseConstraintExpression.
 func scanExpression(phrase string) ([][]string, error) {
 	var scnr scanner.Scanner
 	var orGroups [][]string // all versions a group of and'd groups or'd together

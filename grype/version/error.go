@@ -12,6 +12,73 @@ var ErrUnsupportedVersion = fmt.Errorf("unsupported version value")
 // ErrNoVersionProvided is returned when a version is attempted to be compared, but no other version is provided to compare against.
 var ErrNoVersionProvided = errors.New("no version provided for comparison")
 
+// SyntaxError describes a malformed version constraint expression. It records
+// where in the input the problem occurred so callers can surface an actionable
+// message without leaking internal parser details.
+type SyntaxError struct {
+	// Expression is the original constraint expression.
+	Expression string
+	// Position is the zero-based byte offset of the problem in Expression.
+	Position int
+	// Fragment is a bounded slice of Expression around Position.
+	Fragment string
+	// Reason is a human-readable description of the problem.
+	Reason string
+}
+
+func newSyntaxError(expression string, position int, reason string) *SyntaxError {
+	if position < 0 {
+		position = 0
+	}
+	if position > len(expression) {
+		position = len(expression)
+	}
+	return &SyntaxError{
+		Expression: expression,
+		Position:   position,
+		Fragment:   expressionFragment(expression, position),
+		Reason:     reason,
+	}
+}
+
+// expressionFragment returns a bounded window of the expression centered on
+// position, with ellipses when the window does not cover the whole expression.
+func expressionFragment(expression string, position int) string {
+	const window = 24
+
+	start := position - window
+	if start < 0 {
+		start = 0
+	}
+	end := position + window
+	if end > len(expression) {
+		end = len(expression)
+	}
+
+	fragment := expression[start:end]
+	if start > 0 {
+		fragment = "..." + fragment
+	}
+	if end < len(expression) {
+		fragment += "..."
+	}
+	return fragment
+}
+
+func (e *SyntaxError) Error() string {
+	return fmt.Sprintf("invalid version constraint expression at position %d near %q: %s", e.Position, e.Fragment, e.Reason)
+}
+
+// Is reports whether target describes the same syntax problem, so callers can
+// compare syntax errors by value with errors.Is even when they are wrapped.
+func (e *SyntaxError) Is(target error) bool {
+	var t *SyntaxError
+	if !errors.As(target, &t) {
+		return false
+	}
+	return e.Position == t.Position && e.Expression == t.Expression && e.Reason == t.Reason
+}
+
 // UnsupportedComparisonError represents an error when a format doesn't match the expected format
 type UnsupportedComparisonError struct {
 	Left  Format

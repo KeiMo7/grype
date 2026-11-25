@@ -381,6 +381,26 @@ func TestFuzzyVersion_Constraint(t *testing.T) {
 			constraint: "<0.0.0-20230922105210-14b16010c2ee",
 			satisfied:  false,
 		},
+		// grouped and exclusion syntax must work through the fuzzy (unknown
+		// format) path too, not only through concrete-format constraints
+		{
+			name:       "grouped expression in the fuzzy path",
+			version:    "1.5.0",
+			constraint: "(>= 1.0, < 2.0) || (>= 3.0, < 4.0)",
+			satisfied:  true,
+		},
+		{
+			name:       "grouped expression outside every group in the fuzzy path",
+			version:    "2.5.0",
+			constraint: "(>= 1.0, < 2.0) || (>= 3.0, < 4.0)",
+			satisfied:  false,
+		},
+		{
+			name:       "exclusion expression in the fuzzy path",
+			version:    "1.5.0",
+			constraint: ">= 1.0, < 3.0, !(>= 1.4, < 1.6)",
+			satisfied:  false,
+		},
 	}
 
 	for _, test := range tests {

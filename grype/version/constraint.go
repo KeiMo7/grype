@@ -10,6 +10,18 @@ type Constraint interface {
 }
 
 func GetConstraint(constStr string, format Format) (Constraint, error) {
+	return getConstraint(constStr, format, "")
+}
+
+// GetConstraintWithRecord is GetConstraint with an associated record
+// identifier (for example a vulnerability ID). Parse failures are reported as
+// record-scoped diagnostics so they are countable and attributable instead of
+// being silently dropped.
+func GetConstraintWithRecord(constStr string, format Format, record string) (Constraint, error) {
+	return getConstraint(constStr, format, record)
+}
+
+func getConstraint(constStr string, format Format, record string) (Constraint, error) {
 	var c Constraint
 	var err error
 
@@ -44,6 +56,19 @@ func GetConstraint(constStr string, format Format) (Constraint, error) {
 		c, err = newFuzzyConstraint(constStr, "unknown")
 	default:
 		return nil, fmt.Errorf("could not find constraint for given format: %s", format)
+	}
+
+	if err != nil && record != "" {
+		// Only record-scoped call sites (the database layer) report parse
+		// failures. Generic call sites may parse speculatively (for example the
+		// fuzzy constraint fallback), where an error is expected and belongs to
+		// normal control flow rather than a diagnostic.
+		ReportDiagnostic(Diagnostic{
+			Kind:       ParseErrorDiagnostic,
+			Record:     record,
+			Expression: constStr,
+			Message:    err.Error(),
+		})
 	}
 
 	return c, err

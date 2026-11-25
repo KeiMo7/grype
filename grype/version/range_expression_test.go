@@ -44,7 +44,9 @@ func TestScanExpression(t *testing.T) {
 			},
 		},
 		{
-			name:    "parenthetical expression not supported",
+			// scanExpression is the legacy flat tokenizer; grouping is handled
+			// by parseRangeExpression and is covered in constraint_expression_test.go.
+			name:    "legacy flat tokenizer rejects grouping",
 			phrase:  "(<1.0, >=2.0|| 3.0) || =4.0",
 			wantErr: require.Error,
 		},
